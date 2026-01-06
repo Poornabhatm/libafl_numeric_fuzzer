@@ -1,0 +1,10 @@
+[package]
+name = "libafl_fuzzer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libafl = { path = "../LibAFL/crates/libafl" , features = ["tui_monitor", "std"]}
+libafl_bolts = { path = "../LibAFL/crates/libafl_bolts" }
+env_logger = "0.10"
+log = "0.4"
