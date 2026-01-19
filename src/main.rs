@@ -1,3 +1,6 @@
+// External measurement is currently file-based (power.txt)
+// and will later be replaced by OpenOCD TCP communication.
+
 extern crate libafl;
 extern crate libafl_bolts;
 
@@ -5,6 +8,7 @@ use std::{
     num::NonZeroUsize,
     path::PathBuf,
     borrow::Cow,
+    fs::{read_to_string, write},
 };
 
 use libafl::{
@@ -27,10 +31,10 @@ use libafl_bolts::{
     current_nanos,
     rands::StdRand,
     tuples::tuple_list,
+    AsSlice,
 };
 use libafl::Error;
 use libafl_bolts::Named;
-
 
 #[derive(Clone, Debug)]
 struct NumericFeedback {
@@ -95,15 +99,15 @@ where
             OnDiskCorpus<BytesInput>,
         >,
         _manager: &mut EM,
-        input: &BytesInput,
+        _input: &BytesInput,
         _observers: &OT,
         _exit_kind: &ExitKind,
     ) -> Result<bool, Error> {
-        let value = numeric_measurement(input);
+        let value = numeric_measurement();
 
         if value > self.best {
             self.best = value;
-             println!("New best value: {}", value);
+            println!("New best value: {}", value);
             Ok(true)
         } else {
             Ok(false)
@@ -111,19 +115,22 @@ where
     }
 }
 
+/// Temporary fake measurement.
+/// Will later read real power data from FPGA / OpenOCD.
+fn numeric_measurement() -> f64 {
+        match read_to_string("power.txt") {
+        Ok(s) => s.trim().parse::<f64>().unwrap_or(0.0),
+        Err(e) => 0.0
+        }
+    }
 
-fn numeric_measurement(input: &BytesInput) -> f64 {
-    input
-        .target_bytes()
-        .iter()
-        .map(|b| *b as f64)
-        .sum()
-}
 
-fn target(_input: &BytesInput) -> ExitKind {
+/// Executor target: apply the input.
+/// For now, write input to a file to prove execution happens.
+fn target(input: &BytesInput) -> ExitKind {
+    let _ = write("current_input.bin", input.target_bytes().as_slice());
     ExitKind::Ok
 }
-
 
 fn main() -> Result<(), Error> {
     let rand = StdRand::with_seed(current_nanos());
