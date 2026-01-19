@@ -1,4 +1,6 @@
-/target/
-/crashes/
-**/*.metadata
+/target
+/solutions
+current_input.bin
+Cargo.lock
+
 
