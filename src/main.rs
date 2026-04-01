@@ -4,12 +4,22 @@
 extern crate libafl;
 extern crate libafl_bolts;
 
+use std::io::{Read, Write};
+use std::net::TcpStream;
+
 use std::{
     num::NonZeroUsize,
     path::PathBuf,
     borrow::Cow,
     fs::{read_to_string, write},
 };
+
+fn test_openocd_connection() {
+    match TcpStream::connect("127.0.0.1:6666") {
+        Ok(_) => println!("Connected to OpenOCD!"),
+        Err(e) => println!("Could not connect to OpenOCD: {}", e),
+    }
+}
 
 use libafl::{
     corpus::{InMemoryCorpus, OnDiskCorpus},
@@ -118,12 +128,62 @@ where
 /// Temporary fake measurement.
 /// Will later read real power data from FPGA / OpenOCD.
 fn numeric_measurement() -> f64 {
-        match read_to_string("power.txt") {
+    measurement_from_file()
+    // later: measurement_from_openocd()
+}
+
+fn measurement_from_file() -> f64 {
+    match read_to_string("power.txt") {
         Ok(s) => s.trim().parse::<f64>().unwrap_or(0.0),
-        Err(e) => 0.0
+        Err(_) => 0.0,
+    }
+}
+
+fn measurement_from_openocd() -> f64 {
+    const TOKEN: u8 = 0x1a;
+
+    let mut stream = match TcpStream::connect("127.0.0.1:6666") {
+        Ok(s) => s,
+        Err(e) => {
+            println!("OpenOCD connect failed: {}", e);
+            return 0.0;
+        }
+    };
+
+    let command = b"version\x1a";
+    if let Err(e) = stream.write_all(command) {
+        println!("OpenOCD send failed: {}", e);
+        return 0.0;
+    }
+
+    let mut response = Vec::new();
+    let mut buf = [0u8; 256];
+
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                response.extend_from_slice(&buf[..n]);
+                if response.contains(&TOKEN) {
+                    break;
+                }
+            }
+            Err(e) => {
+                println!("OpenOCD read failed: {}", e);
+                return 0.0;
+            }
         }
     }
 
+    if let Some(pos) = response.iter().position(|&b| b == TOKEN) {
+        response.truncate(pos);
+    }
+
+    let text = String::from_utf8_lossy(&response);
+    println!("OpenOCD response: {}", text);
+
+    0.0
+}
 
 /// Executor target: apply the input.
 /// For now, write input to a file to prove execution happens.
@@ -133,6 +193,9 @@ fn target(input: &BytesInput) -> ExitKind {
 }
 
 fn main() -> Result<(), Error> {
+    test_openocd_connection();
+
+
     let rand = StdRand::with_seed(current_nanos());
 
     let corpus = InMemoryCorpus::<BytesInput>::new();
