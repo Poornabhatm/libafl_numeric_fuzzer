@@ -1,6 +1,3 @@
-// External measurement is currently file-based (power.txt)
-// and will later be replaced by OpenOCD TCP communication.
-
 extern crate libafl;
 extern crate libafl_bolts;
 
@@ -8,18 +5,11 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 
 use std::{
-    num::NonZeroUsize,
-    path::PathBuf,
     borrow::Cow,
     fs::{read_to_string, write},
+    num::NonZeroUsize,
+    path::PathBuf,
 };
-
-fn test_openocd_connection() {
-    match TcpStream::connect("127.0.0.1:6666") {
-        Ok(_) => println!("Connected to OpenOCD!"),
-        Err(e) => println!("Could not connect to OpenOCD: {}", e),
-    }
-}
 
 use libafl::{
     corpus::{InMemoryCorpus, OnDiskCorpus},
@@ -37,14 +27,9 @@ use libafl::{
 
 use libafl::monitors::NopMonitor;
 use libafl::observers::ObserversTuple;
-use libafl_bolts::{
-    current_nanos,
-    rands::StdRand,
-    tuples::tuple_list,
-    AsSlice,
-};
 use libafl::Error;
 use libafl_bolts::Named;
+use libafl_bolts::{current_nanos, rands::StdRand, tuples::tuple_list, AsSlice};
 
 #[derive(Clone, Debug)]
 struct NumericFeedback {
@@ -57,8 +42,7 @@ impl NumericFeedback {
     }
 }
 
-static NUMERIC_FEEDBACK_NAME: Cow<'static, str> =
-    Cow::Borrowed("NumericFeedback");
+static NUMERIC_FEEDBACK_NAME: Cow<'static, str> = Cow::Borrowed("NumericFeedback");
 
 impl Named for NumericFeedback {
     fn name(&self) -> &Cow<'static, str> {
@@ -66,13 +50,8 @@ impl Named for NumericFeedback {
     }
 }
 
-impl<C, I, R, SC> StateInitializer<StdState<C, I, R, SC>>
-    for NumericFeedback
-{
-    fn init_state(
-        &mut self,
-        _state: &mut StdState<C, I, R, SC>,
-    ) -> Result<(), Error> {
+impl<C, I, R, SC> StateInitializer<StdState<C, I, R, SC>> for NumericFeedback {
+    fn init_state(&mut self, _state: &mut StdState<C, I, R, SC>) -> Result<(), Error> {
         Ok(())
     }
 }
@@ -82,22 +61,12 @@ impl<EM, OT>
         EM,
         BytesInput,
         OT,
-        StdState<
-            InMemoryCorpus<BytesInput>,
-            BytesInput,
-            StdRand,
-            OnDiskCorpus<BytesInput>,
-        >,
+        StdState<InMemoryCorpus<BytesInput>, BytesInput, StdRand, OnDiskCorpus<BytesInput>>,
     > for NumericFeedback
 where
     OT: ObserversTuple<
         BytesInput,
-        StdState<
-            InMemoryCorpus<BytesInput>,
-            BytesInput,
-            StdRand,
-            OnDiskCorpus<BytesInput>,
-        >,
+        StdState<InMemoryCorpus<BytesInput>, BytesInput, StdRand, OnDiskCorpus<BytesInput>>,
     >,
 {
     fn is_interesting(
@@ -126,10 +95,10 @@ where
 }
 
 /// Temporary fake measurement.
-/// Will later read real power data from FPGA / OpenOCD.
+///Will later read real power data from oscilloscope / USBTMC / VISA.
 fn numeric_measurement() -> f64 {
     measurement_from_file()
-    // later: measurement_from_openocd()
+    // later: measurement_from_oscilloscope()
 }
 
 fn measurement_from_file() -> f64 {
@@ -139,50 +108,60 @@ fn measurement_from_file() -> f64 {
     }
 }
 
-fn measurement_from_openocd() -> f64 {
+struct OpenOcd {
+    stream: TcpStream,
+}
+
+impl OpenOcd {
     const TOKEN: u8 = 0x1a;
 
-    let mut stream = match TcpStream::connect("127.0.0.1:6666") {
-        Ok(s) => s,
-        Err(e) => {
-            println!("OpenOCD connect failed: {}", e);
-            return 0.0;
-        }
-    };
-
-    let command = b"version\x1a";
-    if let Err(e) = stream.write_all(command) {
-        println!("OpenOCD send failed: {}", e);
-        return 0.0;
+    fn connect(addr: &str) -> std::io::Result<Self> {
+        let stream = TcpStream::connect(addr)?;
+        println!("Connected to OpenOCD!");
+        Ok(Self { stream })
     }
 
-    let mut response = Vec::new();
-    let mut buf = [0u8; 256];
+    fn send_command(&mut self, command: &str) -> std::io::Result<String> {
+        let full_command = format!("{}\x1a", command);
+        self.stream.write_all(full_command.as_bytes())?;
 
-    loop {
-        match stream.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                response.extend_from_slice(&buf[..n]);
-                if response.contains(&TOKEN) {
-                    break;
-                }
+        let mut response = Vec::new();
+        let mut buf = [0u8; 256];
+
+        loop {
+            let n = self.stream.read(&mut buf)?;
+            if n == 0 {
+                break;
             }
-            Err(e) => {
-                println!("OpenOCD read failed: {}", e);
-                return 0.0;
+
+            response.extend_from_slice(&buf[..n]);
+
+            if response.contains(&Self::TOKEN) {
+                break;
             }
         }
+
+        if let Some(pos) = response.iter().position(|&b| b == Self::TOKEN) {
+            response.truncate(pos);
+        }
+
+        Ok(String::from_utf8_lossy(&response).to_string())
     }
 
-    if let Some(pos) = response.iter().position(|&b| b == TOKEN) {
-        response.truncate(pos);
+    fn load_program(&mut self, binary_path: &str) -> std::io::Result<()> {
+        self.send_command("reset init")?;
+        self.send_command(&format!("load_image {}", binary_path))?;
+        self.send_command(&format!("verify_image {} 0x0 elf", binary_path))?;
+        self.send_command("halt 1000")?;
+        self.send_command("set_reg {pc 0x80000000}")?;
+        self.send_command("halt 1000")?;
+        Ok(())
     }
 
-    let text = String::from_utf8_lossy(&response);
-    println!("OpenOCD response: {}", text);
-
-    0.0
+    fn resume(&mut self) -> std::io::Result<()> {
+        self.send_command("resume")?;
+        Ok(())
+    }
 }
 
 /// Executor target: apply the input.
@@ -193,8 +172,21 @@ fn target(input: &BytesInput) -> ExitKind {
 }
 
 fn main() -> Result<(), Error> {
-    test_openocd_connection();
+    let binary_path = "testcases/program.elf";
 
+    let mut openocd = OpenOcd::connect("127.0.0.1:6666").expect("Could not connect to OpenOCD");
+
+    openocd
+        .load_program(binary_path)
+        .expect("Failed to load program");
+
+    let idle_power = numeric_measurement();
+    println!("Idle power: {}", idle_power);
+
+    openocd.resume().expect("Failed to resume");
+
+    let running_power = numeric_measurement();
+    println!("Running power: {}", running_power);
 
     let rand = StdRand::with_seed(current_nanos());
 
@@ -204,13 +196,7 @@ fn main() -> Result<(), Error> {
     let mut feedback = NumericFeedback::new();
     let mut objective = ();
 
-    let mut state = StdState::new(
-        rand,
-        corpus,
-        solutions,
-        &mut feedback,
-        &mut objective,
-    )?;
+    let mut state = StdState::new(rand, corpus, solutions, &mut feedback, &mut objective)?;
 
     let scheduler = QueueScheduler::new();
     let mut fuzzer = StdFuzzer::new(scheduler, feedback, objective);
@@ -218,27 +204,15 @@ fn main() -> Result<(), Error> {
     let monitor = NopMonitor::new();
     let mut manager = SimpleEventManager::new(monitor);
 
-    let mut executor = InProcessExecutor::new(
-        target,
-        tuple_list!(),
-        &mut fuzzer,
-        &mut state,
-        &mut manager,
-    )?;
+    let mut executor =
+        InProcessExecutor::new(target, tuple_list!(), &mut fuzzer, &mut state, &mut manager)?;
 
     let mutator = NopMutator::new(MutationResult::Skipped);
     let stage = StdMutationalStage::new(mutator);
 
-    let mut generator =
-        RandPrintablesGenerator::new(NonZeroUsize::new(32).unwrap());
+    let mut generator = RandPrintablesGenerator::new(NonZeroUsize::new(32).unwrap());
 
-    state.generate_initial_inputs(
-        &mut fuzzer,
-        &mut executor,
-        &mut generator,
-        &mut manager,
-        8,
-    )?;
+    state.generate_initial_inputs(&mut fuzzer, &mut executor, &mut generator, &mut manager, 8)?;
 
     fuzzer.fuzz_loop(
         &mut tuple_list!(stage),
